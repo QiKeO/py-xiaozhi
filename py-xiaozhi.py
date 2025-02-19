@@ -1,8 +1,5 @@
 #!/usr/bin/python
 # -*- coding: UTF-8 -*-
-import warnings
-# 过滤掉特定的警告信息
-warnings.filterwarnings("ignore", category=Warning)
 
 import json
 import time
@@ -10,17 +7,35 @@ import requests
 import paho.mqtt.client as mqtt
 import threading
 import pyaudio
-import opuslib  # windwos平台需要将opus.dll 拷贝到C:\Windows\System32
-import socket
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
-from os import urandom
-import logging
-from pynput import keyboard as pynput_keyboard
+import os
+import sys
 from colorama import init, Fore, Back, Style
 
 # 初始化colorama
 init()
+
+# 检查opus.dll
+def check_opus_dll():
+    system32_path = os.path.join(os.environ['SystemRoot'], 'System32', 'opus.dll')
+    if not os.path.exists(system32_path):
+        print(f"{COLORS['ERROR']}错误：未找到opus.dll文件！{COLORS['RESET']}")
+        print(f"{COLORS['SYSTEM_STATUS']}请将opus.dll文件复制到 C:\\Windows\\System32 目录下{COLORS['RESET']}")
+        print(f"{COLORS['SYSTEM_STATUS']}下载地址：https://github.com/QiKeO/py-xiaozhi{COLORS['RESET']}")
+        return False
+    return True
+
+# 在其他import之前先检查opus.dll
+if sys.platform == 'win32' and not check_opus_dll():
+    sys.exit(1)
+
+import opuslib
+import socket
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+from os import urandom, path
+import logging
+from pynput import keyboard as pynput_keyboard
+import uuid
 
 # 颜色常量定义
 COLORS = {
@@ -41,46 +56,57 @@ ICONS = {
     'AI': '🤖'
 }
 
-OTA_VERSION_URL = 'https://api.tenclass.net/xiaozhi/ota/'
-MAC_ADDR = 'cd:62:f4:3d:b4:ba'
-# {"mqtt":{"endpoint":"post-cn-apg3xckag01.mqtt.aliyuncs.com","client_id":"GID_test@@@cc_ba_97_20_b4_bc",
-# "username":"Signature|LTAI5tF8J3CrdWmRiuTjxHbF|post-cn-apg3xckag01","password":"0mrkMFELXKyelhuYy2FpGDeCigU=",
-# "publish_topic":"device-server","subscribe_topic":"devices"},"firmware":{"version":"0.9.9","url":""}}
-mqtt_info = {}
-aes_opus_info = {"type": "hello", "version": 3, "transport": "udp",
-                 "udp": {"server": "120.24.160.13", "port": 8884, "encryption": "aes-128-ctr",
-                         "key": "263094c3aa28cb42f3965a1020cb21a7", "nonce": "01000000ccba9720b4bc268100000000"},
-                 "audio_params": {"format": "opus", "sample_rate": 24000, "channels": 1, "frame_duration": 60},
-                 "session_id": "b23ebfe9"}
+def get_or_create_device_id():
+    """获取或创建设备唯一标识"""
+    config_file = 'device_config.json'
+    if path.exists(config_file):
+        with open(config_file, 'r') as f:
+            config = json.load(f)
+            return config['device_id'], config['mac_addr']
+    
+    # 生成新的设备ID和MAC地址
+    device_id = str(uuid.uuid4())
+    mac_parts = [format(uuid.uuid4().int >> i & 0xFF, '02x') for i in (40, 32, 24, 16, 8, 0)]
+    mac_addr = ':'.join(mac_parts)
+    
+    # 保存配置
+    config = {'device_id': device_id, 'mac_addr': mac_addr}
+    with open(config_file, 'w') as f:
+        json.dump(config, f)
+    
+    return device_id, mac_addr
 
-iot_msg = {"session_id": "635aa42d", "type": "iot",
-           "descriptors": [{"name": "Speaker", "description": "当前 AI 机器人的扬声器",
-                            "properties": {"volume": {"description": "当前音量值", "type": "number"}},
-                            "methods": {"SetVolume": {"description": "设置音量",
-                                                      "parameters": {
-                                                          "volume": {"description": "0到100之间的整数", "type": "number"}
-                                                      }
-                                                      }
-                                        }
-                            },
-                           {"name": "Lamp", "description": "一个测试用的灯",
-                            "properties": {"power": {"description": "灯是否打开", "type": "boolean"}},
-                            "methods": {"TurnOn": {"description": "打开灯", "parameters": {}},
-                                        "TurnOff": {"description": "关闭灯", "parameters": {}}
-                                        }
-                            }
-                           ]
-           }
-iot_status_msg = {"session_id": "635aa42d", "type": "iot", "states": [
-    {"name": "Speaker", "state": {"volume": 50}}, {"name": "Lamp", "state": {"power": False}}]}
-goodbye_msg = {"session_id": "b23ebfe9", "type": "goodbye"}
+# 获取设备唯一标识
+DEVICE_ID, MAC_ADDR = get_or_create_device_id()
+
+OTA_VERSION_URL = 'https://api.tenclass.net/xiaozhi/ota/'
+mqtt_info = {}
+aes_opus_info = {
+    "type": "hello",
+    "version": 3,
+    "transport": "udp",
+    "udp": {
+        "server": "120.24.160.13",
+        "port": 8884,
+        "encryption": "aes-128-ctr",
+        "key": urandom(16).hex(),  # 生成随机密钥
+        "nonce": urandom(16).hex()  # 生成随机nonce
+    },
+    "audio_params": {
+        "format": "opus",
+        "sample_rate": 24000,
+        "channels": 1,
+        "frame_duration": 60
+    },
+    "session_id": str(uuid.uuid4())  # 生成唯一会话ID
+}
+
 local_sequence = 0
 listen_state = None
 tts_state = None
 key_state = None
 audio = None
 udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-# udp_socket.setblocking(False)
 conn_state = False
 recv_audio_thread = threading.Thread()
 send_audio_thread = threading.Thread()
@@ -151,8 +177,6 @@ def send_audio():
             data = mic.read(960)
             # 编码音频数据
             encoded_data = encoder.encode(data, 960)
-            # 打印音频数据
-            # print(f"Encoded data: {len(encoded_data)}")
             # nonce插入data.size local_sequence_
             local_sequence += 1
             new_nonce = nonce[0:4] + format(len(encoded_data), '04x') + nonce[8:24] + format(local_sequence, '08x')
@@ -161,9 +185,8 @@ def send_audio():
             data = bytes.fromhex(new_nonce) + encrypt_encoded_data
             sent = udp_socket.sendto(data, (server_ip, server_port))
     except Exception as e:
-        print(f"send audio err: {e}")
+        print(f"{COLORS['ERROR']}发送音频错误：{str(e)}{COLORS['RESET']}")
     finally:
-        print("send audio exit()")
         local_sequence = 0
         udp_socket = None
         # 关闭流和PyAudio
@@ -202,11 +225,13 @@ def recv_audio():
 
 
 def on_connect(client, userdata, flags, rs, pr):
-    # subscribe_topic = mqtt_info['subscribe_topic'].split("/")[0] + '/p2p/GID_test@@@' + MAC_ADDR.replace(':', '_')
-    # print(f"subscribe topic: {subscribe_topic}")
-    # client.subscribe(subscribe_topic)
     if rs != 0:  # 只在连接失败时显示错误
         print(f"{COLORS['ERROR']}❌ MQTT服务器连接失败，错误码：{rs}{COLORS['RESET']}")
+        return
+    
+    # 订阅特定设备的主题
+    subscribe_topic = f"{mqtt_info['subscribe_topic'].split('/')[0]}/p2p/GID_test@@@{MAC_ADDR.replace(':', '_')}"
+    client.subscribe(subscribe_topic)
 
 
 def on_message(client, userdata, message):
@@ -220,7 +245,13 @@ def on_message(client, userdata, message):
     elif msg['type'] == 'tts':
         tts_state = msg['state']  # 更新tts状态
         if msg['state'] == 'sentence_start':
-            print(f"{COLORS['AI_RESPONSE']}{ICONS['AI']} 小智：{msg['text']}{COLORS['RESET']}")
+            # 如果消息中包含验证码,添加控制台链接和重启提示
+            if '验证码' in msg['text']:
+                print(f"{COLORS['AI_RESPONSE']}{ICONS['AI']} 小智：{msg['text']}{COLORS['RESET']}")
+                print(f"\n{COLORS['SYSTEM_STATUS']}📱 请访问控制台: https://xiaozhi.me/console/devices{COLORS['RESET']}")
+                print(f"{COLORS['SYSTEM_STATUS']}✨ 完成设备添加后,请重启程序{COLORS['RESET']}\n")
+            else:
+                print(f"{COLORS['AI_RESPONSE']}{ICONS['AI']} 小智：{msg['text']}{COLORS['RESET']}")
         elif msg['state'] == 'start':
             print(f"{COLORS['SYSTEM_STATUS']}{ICONS['PLAYING']} 开始播放{COLORS['RESET']}")
         elif msg['state'] == 'stop':
@@ -249,63 +280,6 @@ def on_message(client, userdata, message):
 def push_mqtt_msg(message):
     global mqtt_info, mqttc
     mqttc.publish(mqtt_info['publish_topic'], json.dumps(message))
-
-
-def test_aes():
-    nonce = "0100000030894a57f148f4f900000000"
-    key = "f3aed12668b8bc72ba41461d78e91be9"
-
-    plaintext = b"Hello, World!"
-
-    # Encrypt the plaintext
-    ciphertext = aes_ctr_encrypt(bytes.fromhex(key), bytes.fromhex(nonce), plaintext)
-    print(f"Ciphertext: {ciphertext.hex()}")
-
-    # Decrypt the ciphertext back to plaintext
-    decrypted_plaintext = aes_ctr_decrypt(bytes.fromhex(key), bytes.fromhex(nonce), ciphertext)
-    print(f"Decrypted plaintext: {decrypted_plaintext}")
-
-
-def test_audio():
-    key = urandom(16)  # AES-256 key
-    print(f"Key: {key.hex()}")
-    nonce = urandom(16)  # Initialization vector (IV) or nonce for CTR mode
-    print(f"Nonce: {nonce.hex()}")
-
-    # 初始化Opus编码器
-    encoder = opuslib.Encoder(16000, 1, opuslib.APPLICATION_AUDIO)
-    decoder = opuslib.Decoder(16000, 1)
-    # 初始化PyAudio
-    p = pyaudio.PyAudio()
-
-    # 打开麦克风流, 帧大小，应该与Opus帧大小匹配
-    mic = p.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=960)
-    spk = p.open(format=pyaudio.paInt16, channels=1, rate=16000, output=True, frames_per_buffer=960)
-
-    try:
-        while True:
-            # 读取音频数据
-            data = mic.read(960)
-            # 编码音频数据
-            encoded_data = encoder.encode(data, 960)
-            # 加密数据，添加nonce
-            encrypt_encoded_data = nonce + aes_ctr_encrypt(key, nonce, bytes(encoded_data))
-            # 解密数据,分离nonce
-            split_encrypt_encoded_data_nonce = encrypt_encoded_data[:len(nonce)]
-            split_encrypt_encoded_data = encrypt_encoded_data[len(nonce):]
-            decrypt_data = aes_ctr_decrypt(key, split_encrypt_encoded_data_nonce, split_encrypt_encoded_data)
-            # 解码播放音频数据
-            spk.write(decoder.decode(decrypt_data, 960))
-            # print(f"Encoded frame size: {len(encoded_data)} bytes")
-    except KeyboardInterrupt:
-        print("停止录制.")
-    finally:
-        # 关闭流和PyAudio
-        mic.stop_stream()
-        mic.close()
-        spk.stop_stream()
-        spk.close()
-        p.terminate()
 
 
 def on_space_key_press(event):

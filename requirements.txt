@@ -1,11 +1,11 @@
 # python=3.12.8
-paho-mqtt>=1.6.1
-pyaudio>=0.2.13
-opuslib>=3.0.1
-cryptography>=41.0.0
-pynput>=1.7.6
-colorama>=0.4.6
-requests>=2.31.0
-urllib3>=2.0.0
-chardet>=5.0.0
-charset-normalizer>=2.0.12
+paho-mqtt==1.6.1
+pyaudio==0.2.14
+opuslib==3.0.1
+cryptography==41.0.7
+pynput==1.7.6
+colorama==0.4.6
+requests==2.31.0
+urllib3==2.1.0
+chardet==5.2.0
+charset-normalizer==3.3.2
